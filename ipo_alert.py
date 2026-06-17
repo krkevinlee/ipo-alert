@@ -264,7 +264,6 @@ def main():
         has_new = True
 
     if not has_new:
-        send_telegram("ℹ️ IPO Alert 실행 완료 (" + now + ")\n새 공시/예비심사 없음")
         print("새 항목 없음")
 
     save_seen(seen)
