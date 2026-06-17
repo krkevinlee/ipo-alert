@@ -28,13 +28,13 @@ def save_seen(seen):
 
 def send_telegram(msg):
     url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    print("텔레그램 응답:", r.status_code, r.text[:100])
 
 
-# ── DART 공시 목록 조회 ────────────────────────────────
 def get_dart_list(detail_ty):
     end = datetime.today()
-    start = end - timedelta(days=3)
+    start = end - timedelta(days=7)
     r = requests.get(
         "https://opendart.fss.or.kr/api/list.json",
         params={
@@ -47,13 +47,18 @@ def get_dart_list(detail_ty):
         },
         timeout=10
     )
-    items = r.json().get("list", [])
-    return [i for i in items
-            if not any(x in i["report_nm"] for x in IPO_EXCLUDE)
-            and any(x in i["report_nm"] for x in IPO_INCLUDE)]
+    data = r.json()
+    print(f"DART {detail_ty} 응답 상태: {r.status_code}, 총 {data.get('total_count', 0)}건")
+    items = data.get("list", [])
+    filtered = [i for i in items
+                if not any(x in i["report_nm"] for x in IPO_EXCLUDE)
+                and any(x in i["report_nm"] for x in IPO_INCLUDE)]
+    print(f"  필터 후 IPO 관련: {len(filtered)}건")
+    for i in filtered:
+        print(f"    - {i['corp_name']} | {i['report_nm']} | {i['rcept_no']}")
+    return filtered
 
 
-# ── DART 기업 기본정보 조회 ────────────────────────────
 def get_corp_info(corp_code):
     try:
         r = requests.get(
@@ -66,9 +71,7 @@ def get_corp_info(corp_code):
         return {}
 
 
-# ── DART 공시 원문에서 공모가/주관사 파싱 ──────────────
 def get_offering_details(rcept_no):
-    """공시 원문 index에서 주요 문서 URL 찾아 공모가·주관사 파싱"""
     details = {"price_range": "", "underwriter": "", "total_amount": "", "shares": ""}
     try:
         r = requests.get(
@@ -76,9 +79,7 @@ def get_offering_details(rcept_no):
             params={"crtfc_key": DART_KEY, "rcept_no": rcept_no},
             timeout=8
         )
-        data = r.json()
-        docs = data.get("list", [])
-        # 투자설명서 또는 증권신고서 본문 찾기
+        docs = r.json().get("list", [])
         target_doc = None
         for doc in docs:
             if any(x in doc.get("dc_nm", "") for x in ["증권신고서", "투자설명서", "요약정보"]):
@@ -86,13 +87,9 @@ def get_offering_details(rcept_no):
                 break
         if not target_doc:
             return details
-
-        # 문서 원문 가져오기
         doc_url = "https://dart.fss.or.kr" + target_doc.get("dc_url", "")
         r2 = requests.get(doc_url, timeout=10)
         text = r2.text
-
-        # 공모가 범위 파싱
         price_patterns = [
             r'희망\s*공모가[^0-9]*([0-9,]+)\s*원?\s*[~～\-]\s*([0-9,]+)\s*원',
             r'공모\s*희망가격[^0-9]*([0-9,]+)\s*[~～\-]\s*([0-9,]+)',
@@ -106,18 +103,12 @@ def get_offering_details(rcept_no):
                 else:
                     details["price_range"] = m.group(1) + "원 (확정)"
                 break
-
-        # 총 공모금액
         amt_m = re.search(r'총\s*공모금액[^0-9]*([0-9,]+)\s*억?\s*원', text)
         if amt_m:
             details["total_amount"] = amt_m.group(1) + "억원"
-
-        # 공모주식수
         shares_m = re.search(r'공모\s*주식수[^0-9]*([0-9,]+)\s*주', text)
         if shares_m:
             details["shares"] = shares_m.group(1) + "주"
-
-        # 대표주관사
         uw_patterns = [
             r'대표\s*주관\s*회사[^가-힣]*([가-힣A-Za-z\s()（）]+(?:증권|투자|금융))',
             r'주관\s*회사[^가-힣]*([가-힣A-Za-z\s()（）]+(?:증권|투자|금융))',
@@ -127,14 +118,11 @@ def get_offering_details(rcept_no):
             if m:
                 details["underwriter"] = m.group(1).strip()[:30]
                 break
-
     except Exception as e:
         print("공시 원문 파싱 오류:", e)
-
     return details
 
 
-# ── KIND 예비심사 크롤링 ───────────────────────────────
 def get_kind_prelim():
     session = requests.Session()
     session.headers.update({
@@ -142,12 +130,9 @@ def get_kind_prelim():
         "Accept-Language": "ko-KR,ko;q=0.9",
     })
     try:
-        session.get(
-            "https://kind.krx.co.kr/listinvstg/listinvstgcom.do?method=searchListInvstgCorpMain",
-            timeout=10
-        )
-    except Exception:
-        pass
+        session.get("https://kind.krx.co.kr/listinvstg/listinvstgcom.do?method=searchListInvstgCorpMain", timeout=10)
+    except Exception as e:
+        print("KIND 세션 오류:", e)
 
     end = datetime.today()
     start = end - timedelta(days=7)
@@ -173,8 +158,8 @@ def get_kind_prelim():
             },
             timeout=10
         )
+        print(f"KIND 응답: {r.status_code}, 길이: {len(r.text)}")
         if r.status_code != 200:
-            print("KIND 응답 오류:", r.status_code)
             return []
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.DOTALL)
         items = []
@@ -192,36 +177,29 @@ def get_kind_prelim():
                     "underwriter": cols[5] if len(cols) > 5 else "",
                     "id": "kind_" + cols[0] + "_" + (cols[2] if len(cols) > 2 else ""),
                 })
+        print(f"KIND 파싱 결과: {len(items)}건")
         return items
     except Exception as e:
         print("KIND 크롤링 오류:", e)
         return []
 
 
-# ── 메시지 포맷 ────────────────────────────────────────
 def fmt_dart_msg(item, is_amendment=False):
     corp_info = get_corp_info(item.get("corp_code", ""))
     details = get_offering_details(item["rcept_no"])
-
     tag = "🔄 [DART] 증권신고서 <b>정정</b>" if is_amendment else "📋 [DART] <b>새 IPO 증권신고서</b>"
     link = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + item["rcept_no"]
-
     lines = [tag, ""]
     lines.append("🏢 기업명: " + item["corp_name"])
-
-    # 기업 기본정보
     if corp_info.get("induty_code"):
         lines.append("🏭 업종: " + corp_info.get("induty_code", ""))
     if corp_info.get("est_dt"):
         lines.append("📆 설립일: " + corp_info.get("est_dt", ""))
     if corp_info.get("hm_url"):
         lines.append("🌐 홈페이지: " + corp_info.get("hm_url", ""))
-
     lines.append("")
     lines.append("📄 공시명: " + item["report_nm"])
     lines.append("📅 접수일: " + item["rcept_dt"])
-
-    # 공모 상세
     if details["price_range"]:
         lines.append("💰 공모가 범위: " + details["price_range"])
     if details["total_amount"]:
@@ -230,7 +208,6 @@ def fmt_dart_msg(item, is_amendment=False):
         lines.append("📊 공모주식수: " + details["shares"])
     if details["underwriter"]:
         lines.append("🏦 대표주관사: " + details["underwriter"])
-
     lines.append("")
     lines.append("🔗 <a href=\"" + link + "\">공시 원문 보기</a>")
     return "\n".join(lines)
@@ -239,7 +216,6 @@ def fmt_dart_msg(item, is_amendment=False):
 def fmt_kind_msg(item):
     emoji = "✅" if "승인" in item["result"] else "⚠️" if any(x in item["result"] for x in ["철회", "미승인"]) else "📨"
     link = "https://kind.krx.co.kr/listinvstg/listinvstgcom.do?method=searchListInvstgCorpMain"
-
     lines = [emoji + " [KIND] 예비심사 <b>" + item["result"] + "</b>", ""]
     lines.append("🏢 기업명: " + item["name"])
     lines.append("📋 상장유형: " + item["listing_type"])
@@ -253,39 +229,46 @@ def fmt_kind_msg(item):
     return "\n".join(lines)
 
 
-# ── 메인 ──────────────────────────────────────────────
 def main():
+    now = datetime.today().strftime("%Y-%m-%d %H:%M")
+    print(f"=== IPO Alert 실행: {now} ===")
     seen = load_seen()
+    print(f"기존 seen 항목 수: {len(seen)}")
     has_new = False
 
-    # 1. DART 증권신고서 (신규 D001)
-    for item in get_dart_list("D001"):
-        if item["rcept_no"] not in seen:
-            send_telegram(fmt_dart_msg(item, is_amendment=False))
-            seen.add(item["rcept_no"])
-            print("DART 신규:", item["corp_name"])
-            has_new = True
+    # DART D001
+    dart_new = get_dart_list("D001")
+    new_d001 = [i for i in dart_new if i["rcept_no"] not in seen]
+    print(f"D001 신규 미발송: {len(new_d001)}건")
+    for item in new_d001:
+        send_telegram(fmt_dart_msg(item, False))
+        seen.add(item["rcept_no"])
+        has_new = True
 
-    # 2. DART 증권신고서 정정 (D003)
-    for item in get_dart_list("D003"):
-        if item["rcept_no"] not in seen:
-            send_telegram(fmt_dart_msg(item, is_amendment=True))
-            seen.add(item["rcept_no"])
-            print("DART 정정:", item["corp_name"])
-            has_new = True
+    # DART D003 (정정)
+    dart_amend = get_dart_list("D003")
+    new_d003 = [i for i in dart_amend if i["rcept_no"] not in seen]
+    print(f"D003 정정 미발송: {len(new_d003)}건")
+    for item in new_d003:
+        send_telegram(fmt_dart_msg(item, True))
+        seen.add(item["rcept_no"])
+        has_new = True
 
-    # 3. KIND 예비심사
-    for item in get_kind_prelim():
-        if item["id"] not in seen:
-            send_telegram(fmt_kind_msg(item))
-            seen.add(item["id"])
-            print("KIND:", item["name"], item["result"])
-            has_new = True
+    # KIND
+    kind_items = get_kind_prelim()
+    new_kind = [i for i in kind_items if i["id"] not in seen]
+    print(f"KIND 신규 미발송: {len(new_kind)}건")
+    for item in new_kind:
+        send_telegram(fmt_kind_msg(item))
+        seen.add(item["id"])
+        has_new = True
 
     if not has_new:
-        print("새 공시/예비심사 없음")
+        send_telegram("ℹ️ IPO Alert 실행 완료 (" + now + ")\n새 공시/예비심사 없음")
+        print("새 항목 없음")
 
     save_seen(seen)
+    print("완료")
 
 
 if __name__ == "__main__":
