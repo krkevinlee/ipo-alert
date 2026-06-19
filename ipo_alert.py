@@ -82,7 +82,9 @@ def get_38():
                 result[mode].append({"date": m.group(1), "name": m.group(2).strip()})
 
     # 공모청약 테이블 파싱
-    # 구조: 기업명 줄 → 날짜 줄 → 확정가 줄 → 희망가 줄 → 경쟁률 줄 → 주간사 줄
+    # 구조: 기업명 → 날짜(2026.MM.DD~MM.DD) → 확정가(-또는숫자) → 희망가(숫자~숫자) → 경쟁률(숫자:1 또는-) → 주관사(증권사명)
+    UNDERWRITER_KEYWORDS = ['증권', '투자', '은행', '금융', 'IBK', 'KB', 'NH', 'SK', '미래에셋', '삼성', '한국', '신한', '대신', '키움', '유진', '메리츠', '교보', '하나', '유안타']
+
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -91,23 +93,36 @@ def get_38():
             name = lines[i-1]
             if len(name) >= 2 and '스팩' not in name and not re.search(r'\d{4}\.', name):
                 date = m.group(1)
-                confirmed = lines[i+1] if i+1 < len(lines) else "-"
-                price_range = lines[i+2] if i+2 < len(lines) else "-"
-                competition = lines[i+3] if i+3 < len(lines) else "-"
-                underwriter = lines[i+4] if i+4 < len(lines) else "-"
+                # 다음 줄들에서 값 추출
+                confirmed = "-"
+                price_range = "-"
+                competition = "-"
+                underwriter = "-"
 
-                # 값 검증
-                if not re.search(r'\d', confirmed): confirmed = "-"
-                if not re.search(r'\d', price_range): price_range = "-"
-                if not re.match(r'^[\d\.\:]+$|^-$', competition.strip()): competition = "-"
-                if len(underwriter) > 30 or re.search(r'\d{4}', underwriter): underwriter = "-"
+                for j in range(1, 6):
+                    if i + j >= len(lines):
+                        break
+                    val = lines[i + j].strip()
+                    # 확정가: 숫자,숫자 또는 "-"
+                    if confirmed == "-" and (val == "-" or re.match(r'^[\d,]+$', val)):
+                        confirmed = val
+                    # 희망가: 숫자~숫자 형태
+                    elif price_range == "-" and re.match(r'^[\d,]+~[\d,]+$', val):
+                        price_range = val
+                    # 경쟁률: 숫자:1 형태
+                    elif competition == "-" and re.match(r'^[\d,\.]+:\d+$', val):
+                        competition = val
+                    # 주관사: 증권사 키워드 포함
+                    elif underwriter == "-" and any(k in val for k in UNDERWRITER_KEYWORDS):
+                        underwriter = val[:30]
+                        break
 
                 result["table"].append({
                     "name": name, "date": date,
                     "confirmed": confirmed,
                     "range": price_range,
                     "competition": competition,
-                    "underwriter": underwriter[:25],
+                    "underwriter": underwriter,
                 })
         i += 1
 
