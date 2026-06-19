@@ -1,4 +1,4 @@
-import requests, os, re, json, traceback
+import requests, os, re, json, traceback, ssl
 from datetime import datetime
 import urllib3
 urllib3.disable_warnings()
@@ -32,12 +32,42 @@ def send(msg, parse_mode="HTML"):
         print("텔레그램 오류:", e)
 
 
+def make_ssl_session():
+    """SSL 설정을 낮춰서 레거시 서버 대응"""
+    session = requests.Session()
+    # SSLv3 핸드셰이크 실패 우회 - TLSv1/TLSv1.1 허용
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.options &= ~ssl.OP_NO_SSLv3
+    ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
+
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.ssl_ import create_urllib3_context
+
+    class LegacySSLAdapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            ctx2 = create_urllib3_context()
+            ctx2.check_hostname = False
+            ctx2.verify_mode = ssl.CERT_NONE
+            ctx2.set_ciphers('DEFAULT:@SECLEVEL=0')
+            kwargs['ssl_context'] = ctx2
+            super().init_poolmanager(*args, **kwargs)
+
+    session.mount('https://', LegacySSLAdapter())
+    return session
+
+
 def get_38():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    r = requests.get("https://www.38.co.kr/html/fund/index.htm?o=k",
-                     headers=headers, timeout=20, verify=False)
+    session = make_ssl_session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    r = session.get("https://www.38.co.kr/html/fund/index.htm?o=k",
+                    headers=headers, timeout=20, verify=False)
     r.encoding = 'euc-kr'
-    # HTML 태그 제거
     text = re.sub(r'<[^>]+>', '\n', r.text)
     text = re.sub(r'&nbsp;', ' ', text)
     text = re.sub(r'&[a-zA-Z0-9#]+;', '', text)
@@ -58,7 +88,6 @@ def get_38():
             if m:
                 result[mode].append({"date": m.group(1), "name": m.group(2).strip()})
 
-    # 테이블 파싱: 날짜 패턴 앞 줄이 기업명
     for i, line in enumerate(lines):
         if re.match(r'^2026\.\d{2}\.\d{2}~\d{2}\.\d{2}', line) and i > 0:
             name = lines[i-1]
@@ -82,17 +111,10 @@ def main():
 
     try:
         data = get_38()
-        send("🔍 디버그: 청구=" + str(len(data["apply"])) +
-             " 승인=" + str(len(data["approve"])) +
-             " 테이블=" + str(len(data["table"])) +
-             "\n청구목록: " + str([a["name"] for a in data["apply"][:3]]) +
-             "\n승인목록: " + str([a["name"] for a in data["approve"][:3]]) +
-             "\n테이블: " + str([t["name"] for t in data["table"][:3]]), parse_mode="")
     except Exception as e:
-        send("❌ 38.co.kr 파싱 오류:\n" + traceback.format_exc()[-500:], parse_mode="")
+        send("❌ 38.co.kr 오류:\n" + traceback.format_exc()[-600:], parse_mode="")
         return
 
-    # 새 청구/승인 알림
     new_apply = [a for a in data["apply"] if "A:" + a["name"] not in seen]
     new_approve = [a for a in data["approve"] if "P:" + a["name"] not in seen]
 
@@ -104,7 +126,6 @@ def main():
         send("✅ <b>[KIND] 예비심사 승인</b>\n\n🏢 " + a["name"] + " (" + a["date"] + ")\n🔗 <a href=\"https://kind.krx.co.kr/listinvstg/listinvstgcom.do?method=searchListInvstgCorpMain\">KIND 바로가기</a>")
         seen.add("P:" + a["name"])
 
-    # 일일 요약
     has_new = bool(new_apply or new_approve)
     L = ["✅ <b>IPO Alert</b> (" + now + ")",
          "위 항목 외 추가 없음" if has_new else "오늘 새 청구/승인 없음", ""]
