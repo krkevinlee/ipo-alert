@@ -32,42 +32,35 @@ def send(msg, parse_mode="HTML"):
         print("텔레그램 오류:", e)
 
 
-def make_ssl_session():
-    """SSL 설정을 낮춰서 레거시 서버 대응"""
-    session = requests.Session()
-    # SSLv3 핸드셰이크 실패 우회 - TLSv1/TLSv1.1 허용
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.options &= ~ssl.OP_NO_SSLv3
-    ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
-
+def make_session():
     from requests.adapters import HTTPAdapter
     from urllib3.util.ssl_ import create_urllib3_context
 
     class LegacySSLAdapter(HTTPAdapter):
         def init_poolmanager(self, *args, **kwargs):
-            ctx2 = create_urllib3_context()
-            ctx2.check_hostname = False
-            ctx2.verify_mode = ssl.CERT_NONE
-            ctx2.set_ciphers('DEFAULT:@SECLEVEL=0')
-            kwargs['ssl_context'] = ctx2
+            ctx = create_urllib3_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
+            kwargs['ssl_context'] = ctx
             super().init_poolmanager(*args, **kwargs)
 
+    session = requests.Session()
     session.mount('https://', LegacySSLAdapter())
     return session
 
 
 def get_38():
-    session = make_ssl_session()
+    session = make_session()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "ko-KR,ko;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     r = session.get("https://www.38.co.kr/html/fund/index.htm?o=k",
                     headers=headers, timeout=20, verify=False)
     r.encoding = 'euc-kr'
+
+    # HTML 태그 제거
     text = re.sub(r'<[^>]+>', '\n', r.text)
     text = re.sub(r'&nbsp;', ' ', text)
     text = re.sub(r'&[a-zA-Z0-9#]+;', '', text)
@@ -88,19 +81,35 @@ def get_38():
             if m:
                 result[mode].append({"date": m.group(1), "name": m.group(2).strip()})
 
-    for i, line in enumerate(lines):
-        if re.match(r'^2026\.\d{2}\.\d{2}~\d{2}\.\d{2}', line) and i > 0:
+    # 공모청약 테이블 파싱
+    # 구조: 기업명 줄 → 날짜 줄 → 확정가 줄 → 희망가 줄 → 경쟁률 줄 → 주간사 줄
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r'^(2026\.\d{2}\.\d{2}~\d{2}\.\d{2})$', line)
+        if m and i > 0:
             name = lines[i-1]
-            if len(name) < 2 or '스팩' in name or re.search(r'\d{4}\.', name): continue
-            parts = line.split()
-            result["table"].append({
-                "name": name,
-                "date": parts[0],
-                "confirmed": parts[1] if len(parts) > 1 else "-",
-                "range": parts[2] if len(parts) > 2 else "-",
-                "competition": parts[3] if len(parts) > 3 else "-",
-                "underwriter": " ".join(parts[4:])[:25] if len(parts) > 4 else "-",
-            })
+            if len(name) >= 2 and '스팩' not in name and not re.search(r'\d{4}\.', name):
+                date = m.group(1)
+                confirmed = lines[i+1] if i+1 < len(lines) else "-"
+                price_range = lines[i+2] if i+2 < len(lines) else "-"
+                competition = lines[i+3] if i+3 < len(lines) else "-"
+                underwriter = lines[i+4] if i+4 < len(lines) else "-"
+
+                # 값 검증
+                if not re.search(r'\d', confirmed): confirmed = "-"
+                if not re.search(r'\d', price_range): price_range = "-"
+                if not re.match(r'^[\d\.\:]+$|^-$', competition.strip()): competition = "-"
+                if len(underwriter) > 30 or re.search(r'\d{4}', underwriter): underwriter = "-"
+
+                result["table"].append({
+                    "name": name, "date": date,
+                    "confirmed": confirmed,
+                    "range": price_range,
+                    "competition": competition,
+                    "underwriter": underwriter[:25],
+                })
+        i += 1
 
     return result
 
@@ -112,9 +121,10 @@ def main():
     try:
         data = get_38()
     except Exception as e:
-        send("❌ 38.co.kr 오류:\n" + traceback.format_exc()[-600:], parse_mode="")
+        send("❌ 오류:\n" + traceback.format_exc()[-500:], parse_mode="")
         return
 
+    # 새 청구/승인 알림
     new_apply = [a for a in data["apply"] if "A:" + a["name"] not in seen]
     new_approve = [a for a in data["approve"] if "P:" + a["name"] not in seen]
 
@@ -130,38 +140,44 @@ def main():
     L = ["✅ <b>IPO Alert</b> (" + now + ")",
          "위 항목 외 추가 없음" if has_new else "오늘 새 청구/승인 없음", ""]
 
+    # 최근 예비심사 청구 (스팩 제외 3개)
     apply_f = [a for a in data["apply"] if "스팩" not in a["name"]][:3]
     L.append("📨 <b>최근 예비심사 청구</b>")
     for a in apply_f: L.append("  " + a["date"] + " " + a["name"])
     if not apply_f: L.append("  (없음)")
     L.append("")
 
+    # 최근 예비심사 승인 (스팩 제외 3개)
     approve_f = [a for a in data["approve"] if "스팩" not in a["name"]][:3]
     L.append("✅ <b>최근 예비심사 승인</b>")
     for a in approve_f: L.append("  " + a["date"] + " " + a["name"])
     if not approve_f: L.append("  (없음)")
     L.append("")
 
+    # 최근 IPO 공모기업 상세 (스팩 제외 3개)
     table_f = [t for t in data["table"] if "스팩" not in t["name"]][:3]
     L.append("📋 <b>최근 IPO 공모기업</b>")
     if table_f:
         for t in table_f:
-            line = "  • <b>" + t["name"] + "</b> | 청약: " + t["date"]
-            if t["range"] != "-": line += "\n    💰 " + t["range"]
-            if t["confirmed"] != "-": line += " → 확정: " + t["confirmed"]
-            if t["competition"] != "-": line += " | 경쟁률: " + t["competition"]
-            if t["underwriter"] != "-": line += "\n    🏛 " + t["underwriter"]
+            line = "  • <b>" + t["name"] + "</b>"
+            line += "\n    📅 청약: " + t["date"]
+            if t["range"] not in ["-", ""]: line += "\n    💰 " + t["range"]
+            if t["confirmed"] not in ["-", ""]: line += " → 확정: " + t["confirmed"]
+            if t["competition"] not in ["-", ""]: line += "\n    📊 경쟁률: " + t["competition"]
+            if t["underwriter"] not in ["-", ""]: line += "\n    🏛 " + t["underwriter"]
             L.append(line)
     else:
         L.append("  (없음)")
     L.append("")
 
+    # 공모청약 일정 (스팩 제외 4개)
     sub_f = [s for s in data["sub"] if "스팩" not in s["name"]][:4]
     L.append("🗓 <b>공모청약 일정</b>")
     for s in sub_f: L.append("  " + s["date"] + " " + s["name"])
     if not sub_f: L.append("  (없음)")
     L.append("")
 
+    # 신규상장 일정 (스팩 제외 4개)
     list_f = [l for l in data["listing"] if "스팩" not in l["name"]][:4]
     L.append("🔔 <b>신규상장 일정</b>")
     for l in list_f: L.append("  " + l["date"] + " " + l["name"])
